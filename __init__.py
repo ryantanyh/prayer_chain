@@ -1,77 +1,109 @@
-#!/usr/bin/env python
+"""
+pip._vendor is for vendoring dependencies of pip to prevent needing pip to
+depend on something external.
+
+Files inside of pip._vendor should be considered immutable and should only be
+updated to versions from upstream.
+"""
 from __future__ import absolute_import
 
-import locale
-import logging
-import os
-import warnings
-
+import glob
+import os.path
 import sys
 
-# 2016-06-17 barry@debian.org: urllib3 1.14 added optional support for socks,
-# but if invoked (i.e. imported), it will issue a warning to stderr if socks
-# isn't available.  requests unconditionally imports urllib3's socks contrib
-# module, triggering this warning.  The warning breaks DEP-8 tests (because of
-# the stderr output) and is just plain annoying in normal usage.  I don't want
-# to add socks as yet another dependency for pip, nor do I want to allow-stderr
-# in the DEP-8 tests, so just suppress the warning.  pdb tells me this has to
-# be done before the import of pip.vcs.
-from pip._vendor.urllib3.exceptions import DependencyWarning
-warnings.filterwarnings("ignore", category=DependencyWarning)  # noqa
+# Downstream redistributors which have debundled our dependencies should also
+# patch this value to be true. This will trigger the additional patching
+# to cause things like "six" to be available as pip.
+DEBUNDLED = False
 
-# We want to inject the use of SecureTransport as early as possible so that any
-# references or sessions or what have you are ensured to have it, however we
-# only want to do this in the case that we're running on macOS and the linked
-# OpenSSL is too old to handle TLSv1.2
-try:
-    import ssl
-except ImportError:
-    pass
-else:
-    # Checks for OpenSSL 1.0.1 on MacOS
-    if sys.platform == "darwin" and ssl.OPENSSL_VERSION_NUMBER < 0x1000100f:
-        try:
-            from pip._vendor.urllib3.contrib import securetransport
-        except (ImportError, OSError):
-            pass
-        else:
-            securetransport.inject_into_urllib3()
-
-from pip._internal.cli.autocompletion import autocomplete
-from pip._internal.cli.main_parser import parse_command
-from pip._internal.commands import commands_dict
-from pip._internal.exceptions import PipError
-from pip._internal.utils import deprecation
-from pip._vendor.urllib3.exceptions import InsecureRequestWarning
-
-logger = logging.getLogger(__name__)
-
-# Hide the InsecureRequestWarning from urllib3
-warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+# By default, look in this directory for a bunch of .whl files which we will
+# add to the beginning of sys.path before attempting to import anything. This
+# is done to support downstream re-distributors like Debian and Fedora who
+# wish to create their own Wheels for our dependencies to aid in debundling.
+WHEEL_DIR = os.path.abspath(os.path.dirname(__file__))
 
 
-def main(args=None):
-    if args is None:
-        args = sys.argv[1:]
-
-    # Configure our deprecation warnings to be sent through loggers
-    deprecation.install_warning_logger()
-
-    autocomplete()
+# Define a small helper function to alias our vendored modules to the real ones
+# if the vendored ones do not exist. This idea of this was taken from
+# https://github.com/kennethreitz/requests/pull/2567.
+def vendored(modulename):
+    vendored_name = "{0}.{1}".format(__name__, modulename)
 
     try:
-        cmd_name, cmd_args = parse_command(args)
-    except PipError as exc:
-        sys.stderr.write("ERROR: %s" % exc)
-        sys.stderr.write(os.linesep)
-        sys.exit(1)
+        __import__(modulename, globals(), locals(), level=0)
+    except ImportError:
+        # We can just silently allow import failures to pass here. If we
+        # got to this point it means that ``import pip._vendor.whatever``
+        # failed and so did ``import whatever``. Since we're importing this
+        # upfront in an attempt to alias imports, not erroring here will
+        # just mean we get a regular import error whenever pip *actually*
+        # tries to import one of these modules to use it, which actually
+        # gives us a better error message than we would have otherwise
+        # gotten.
+        pass
+    else:
+        sys.modules[vendored_name] = sys.modules[modulename]
+        base, head = vendored_name.rsplit(".", 1)
+        setattr(sys.modules[base], head, sys.modules[modulename])
 
-    # Needed for locale.getpreferredencoding(False) to work
-    # in pip._internal.utils.encoding.auto_decode
-    try:
-        locale.setlocale(locale.LC_ALL, '')
-    except locale.Error as e:
-        # setlocale can apparently crash if locale are uninitialized
-        logger.debug("Ignoring error %s when setting locale", e)
-    command = commands_dict[cmd_name](isolated=("--isolated" in cmd_args))
-    return command.main(cmd_args)
+
+# If we're operating in a debundled setup, then we want to go ahead and trigger
+# the aliasing of our vendored libraries as well as looking for wheels to add
+# to our sys.path. This will cause all of this code to be a no-op typically
+# however downstream redistributors can enable it in a consistent way across
+# all platforms.
+if DEBUNDLED:
+    # Actually look inside of WHEEL_DIR to find .whl files and add them to the
+    # front of our sys.path.
+    sys.path[:] = glob.glob(os.path.join(WHEEL_DIR, "*.whl")) + sys.path
+
+    # Actually alias all of our vendored dependencies.
+    vendored("cachecontrol")
+    vendored("colorama")
+    vendored("distlib")
+    vendored("distro")
+    vendored("html5lib")
+    vendored("lockfile")
+    vendored("six")
+    vendored("six.moves")
+    vendored("six.moves.urllib")
+    vendored("six.moves.urllib.parse")
+    vendored("packaging")
+    vendored("packaging.version")
+    vendored("packaging.specifiers")
+    vendored("pep517")
+    vendored("pkg_resources")
+    vendored("progress")
+    vendored("pytoml")
+    vendored("retrying")
+    vendored("requests")
+    vendored("requests.exceptions")
+    vendored("requests.packages")
+    vendored("requests.packages.urllib3")
+    vendored("requests.packages.urllib3._collections")
+    vendored("requests.packages.urllib3.connection")
+    vendored("requests.packages.urllib3.connectionpool")
+    vendored("requests.packages.urllib3.contrib")
+    vendored("requests.packages.urllib3.contrib.ntlmpool")
+    vendored("requests.packages.urllib3.contrib.pyopenssl")
+    vendored("requests.packages.urllib3.exceptions")
+    vendored("requests.packages.urllib3.fields")
+    vendored("requests.packages.urllib3.filepost")
+    vendored("requests.packages.urllib3.packages")
+    vendored("requests.packages.urllib3.packages.ordered_dict")
+    vendored("requests.packages.urllib3.packages.six")
+    vendored("requests.packages.urllib3.packages.ssl_match_hostname")
+    vendored("requests.packages.urllib3.packages.ssl_match_hostname."
+             "_implementation")
+    vendored("requests.packages.urllib3.poolmanager")
+    vendored("requests.packages.urllib3.request")
+    vendored("requests.packages.urllib3.response")
+    vendored("requests.packages.urllib3.util")
+    vendored("requests.packages.urllib3.util.connection")
+    vendored("requests.packages.urllib3.util.request")
+    vendored("requests.packages.urllib3.util.response")
+    vendored("requests.packages.urllib3.util.retry")
+    vendored("requests.packages.urllib3.util.ssl_")
+    vendored("requests.packages.urllib3.util.timeout")
+    vendored("requests.packages.urllib3.util.url")
+    vendored("urllib3")
